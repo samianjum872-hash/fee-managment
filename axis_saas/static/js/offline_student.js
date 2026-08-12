@@ -5,22 +5,29 @@
     'use strict';
 
     const DB_NAME = 'AxisOfflineDB';
-    const STORE_NAME = 'offlineStudents';
-    const DB_VERSION = 1;
+    const DB_VERSION = 2;
+    const OFFLINE_STUDENTS_STORE = 'offlineStudents';
+    const OFFLINE_PAYMENTS_STORE = 'offlinePayments';
 
     let db = null;
 
     function openDB() {
         return new Promise((resolve, reject) => {
             const request = indexedDB.open(DB_NAME, DB_VERSION);
-            request.onupgradeneeded = (ev) => {
-                const db = ev.target.result;
-                if (!db.objectStoreNames.contains(STORE_NAME)) {
-                    db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+            request.onupgradeneeded = (event) => {
+                const database = event.target.result;
+                if (!database.objectStoreNames.contains(OFFLINE_STUDENTS_STORE)) {
+                    database.createObjectStore(OFFLINE_STUDENTS_STORE, { keyPath: 'id', autoIncrement: true });
+                }
+                if (!database.objectStoreNames.contains(OFFLINE_PAYMENTS_STORE)) {
+                    const paymentsStore = database.createObjectStore(OFFLINE_PAYMENTS_STORE, { keyPath: 'id', autoIncrement: true });
+                    paymentsStore.createIndex('student_id', 'student_id', { unique: false });
+                    paymentsStore.createIndex('temp_receipt', 'temp_receipt', { unique: true });
+                    paymentsStore.createIndex('synced', 'synced', { unique: false });
                 }
             };
-            request.onsuccess = (ev) => resolve(ev.target.result);
-            request.onerror = (ev) => reject(ev.target.error);
+            request.onsuccess = (event) => resolve(event.target.result);
+            request.onerror = (event) => reject(event.target.error);
         });
     }
 
@@ -30,10 +37,10 @@
     }
 
     async function saveOfflineStudent(data) {
-        const db = await getDB();
+        const database = await getDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            const store = tx.objectStore(STORE_NAME);
+            const tx = database.transaction(OFFLINE_STUDENTS_STORE, 'readwrite');
+            const store = tx.objectStore(OFFLINE_STUDENTS_STORE);
             const request = store.add(data);
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
@@ -41,10 +48,10 @@
     }
 
     async function getOfflineStudents() {
-        const db = await getDB();
+        const database = await getDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readonly');
-            const store = tx.objectStore(STORE_NAME);
+            const tx = database.transaction(OFFLINE_STUDENTS_STORE, 'readonly');
+            const store = tx.objectStore(OFFLINE_STUDENTS_STORE);
             const request = store.getAll();
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
@@ -52,14 +59,115 @@
     }
 
     async function deleteOfflineStudent(id) {
-        const db = await getDB();
+        const database = await getDB();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            const store = tx.objectStore(STORE_NAME);
+            const tx = database.transaction(OFFLINE_STUDENTS_STORE, 'readwrite');
+            const store = tx.objectStore(OFFLINE_STUDENTS_STORE);
             const request = store.delete(id);
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
         });
+    }
+
+    async function saveOfflinePayment(data) {
+        const database = await getDB();
+        return new Promise((resolve, reject) => {
+            const tx = database.transaction(OFFLINE_PAYMENTS_STORE, 'readwrite');
+            const store = tx.objectStore(OFFLINE_PAYMENTS_STORE);
+            const payload = Object.assign({}, data, {
+                created_at: new Date().toISOString(),
+                synced: false,
+                temp_receipt: data.temp_receipt || makeTempReceipt()
+            });
+            const request = store.add(payload);
+            request.onsuccess = () => resolve(Object.assign({ id: request.result }, payload));
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function getOfflinePayments() {
+        const database = await getDB();
+        return new Promise((resolve, reject) => {
+            const tx = database.transaction(OFFLINE_PAYMENTS_STORE, 'readonly');
+            const store = tx.objectStore(OFFLINE_PAYMENTS_STORE);
+            const request = store.getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function deleteOfflinePayment(id) {
+        const database = await getDB();
+        return new Promise((resolve, reject) => {
+            const tx = database.transaction(OFFLINE_PAYMENTS_STORE, 'readwrite');
+            const store = tx.objectStore(OFFLINE_PAYMENTS_STORE);
+            const request = store.delete(id);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function getOfflinePaymentsByStudent(studentId) {
+        const database = await getDB();
+        return new Promise((resolve, reject) => {
+            const tx = database.transaction(OFFLINE_PAYMENTS_STORE, 'readonly');
+            const store = tx.objectStore(OFFLINE_PAYMENTS_STORE);
+            const index = store.index('student_id');
+            const request = index.getAll(Number(studentId));
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function updateOfflinePayment(id, updates) {
+        const database = await getDB();
+        return new Promise((resolve, reject) => {
+            const tx = database.transaction(OFFLINE_PAYMENTS_STORE, 'readwrite');
+            const store = tx.objectStore(OFFLINE_PAYMENTS_STORE);
+            const getReq = store.get(id);
+            getReq.onsuccess = () => {
+                const record = getReq.result;
+                if (!record) {
+                    return reject(new Error(`Offline payment ${id} not found`));
+                }
+                Object.assign(record, updates);
+                const putReq = store.put(record);
+                putReq.onsuccess = () => resolve(record);
+                putReq.onerror = () => reject(putReq.error);
+            };
+            getReq.onerror = () => reject(getReq.error);
+        });
+    }
+
+    function makeTempReceipt() {
+        return `OFFLINE-${Date.now()}-${Math.random().toString(36).substr(2, 8).toUpperCase()}`;
+    }
+
+    function getCsrfToken() {
+        const cookie = document.cookie.split('; ').find(row => row.trim().startsWith('csrftoken='));
+        return cookie ? cookie.split('=')[1] : '';
+    }
+
+    function broadcastOfflineUpdate(type, data) {
+        if (!window.BroadcastChannel) return;
+        try {
+            const channel = new BroadcastChannel('axis-offline-sync');
+            channel.postMessage({ type, data, time: Date.now() });
+        } catch (err) {
+            console.warn('[Offline] Broadcast update failed', err);
+        }
+    }
+
+    function receiveOfflineUpdates(callback) {
+        if (!window.BroadcastChannel) return null;
+        try {
+            const channel = new BroadcastChannel('axis-offline-sync');
+            channel.addEventListener('message', event => callback(event.data));
+            return channel;
+        } catch (err) {
+            console.warn('[Offline] Broadcast receive failed', err);
+            return null;
+        }
     }
 
     function parseOfflineAction(form) {
@@ -199,23 +307,12 @@
     async function renderPendingQueue() {
         try {
             const queue = await getOfflineStudents();
-            console.log('[Offline] renderPendingQueue called, items:', queue.length);
-            if (!queue.length) {
-                console.log('[Offline] No pending items to render');
-                return;
-            }
-            
+            if (!queue.length) return;
             renderOfflineBanner(queue.length);
 
             if (isStudentListPage()) {
-                console.log('[Offline] On student list page, attempting to render', queue.length, 'pending students');
-                
-                // Desktop table
                 const tableBody = document.querySelector('.data-table tbody');
-                console.log('[Offline] .data-table tbody:', tableBody ? '✓ FOUND' : '✗ NOT FOUND');
-                
                 if (tableBody) {
-                    let addedCount = 0;
                     queue.forEach(item => {
                         const action = item.action || 'create';
                         if (action === 'create') {
@@ -223,20 +320,12 @@
                             if (!existing) {
                                 const row = buildPendingRow(item);
                                 tableBody.prepend(row);
-                                addedCount++;
-                                console.log('[Offline] ✓ Prepended to desktop:', item.data.name);
                             }
                         }
                     });
-                    console.log('[Offline] Desktop: Added', addedCount, 'pending students');
                 }
-                
-                // Mobile list
                 const mobileContainer = document.getElementById('studentContainer');
-                console.log('[Offline] #studentContainer:', mobileContainer ? '✓ FOUND' : '✗ NOT FOUND');
-                
                 if (mobileContainer) {
-                    let addedCount = 0;
                     queue.forEach(item => {
                         const action = item.action || 'create';
                         if (action === 'create') {
@@ -244,32 +333,10 @@
                             if (!existing) {
                                 const card = buildPendingCard(item);
                                 mobileContainer.prepend(card);
-                                addedCount++;
-                                console.log('[Offline] ✓ Prepended to mobile:', item.data.name);
                             }
                         }
                     });
-                    console.log('[Offline] Mobile: Added', addedCount, 'pending students');
                 }
-                
-                if (!tableBody && !mobileContainer) {
-                    console.warn('[Offline] ⚠️  Neither .data-table tbody nor #studentContainer found!');
-                    console.warn('[Offline] Possible causes: (1) Service worker not serving cached list page, (2) offline_student.js loaded before DOM ready, (3) This is not a list page');
-                    console.warn('[Offline] URL:', window.location.href);
-                    console.warn('[Offline] Page body available:', !!document.body);
-                }
-                
-                // Handle edits
-                queue.forEach(item => {
-                    const action = item.action || 'create';
-                    if (action === 'edit' && item.student_id) {
-                        const desktopRow = document.querySelector(`tr[data-student-id='${item.student_id}']`);
-                        if (desktopRow) {
-                            desktopRow.querySelector('td:nth-child(2)').innerHTML = `<strong>${item.data.name || desktopRow.querySelector('td:nth-child(2)').textContent}</strong> <span style="display:inline-block;margin-left:0.5rem;padding:0.15rem 0.55rem;border-radius:999px;background:#fef3c7;color:#92400e;font-size:0.7rem;font-weight:700;">Edit pending</span>`;
-                            console.log('[Offline] ✓ Marked edit pending on:', item.data.name);
-                        }
-                    }
-                });
             }
 
             if (isStudentProfilePage()) {
@@ -285,12 +352,17 @@
                     banner.textContent = message;
                     const header = document.querySelector('.profile-header');
                     if (header) header.parentNode.insertBefore(banner, header.nextSibling);
-                    console.log('[Offline] ✓ Showed profile edit pending banner');
                 }
             }
         } catch (err) {
             console.error('[Offline] Error rendering pending queue:', err);
         }
+    }
+
+    function getSchemaFromPath() {
+        const pathParts = window.location.pathname.split('/').filter(Boolean);
+        const portalIndex = pathParts.indexOf('portal');
+        return portalIndex >= 0 && pathParts.length > portalIndex + 1 ? pathParts[portalIndex + 1] : null;
     }
 
     function refreshStudentListPage() {
@@ -300,23 +372,13 @@
         window.location.replace(url.toString());
     }
 
-    // Sync function: send all offline students to server
     async function syncOfflineStudents() {
         if (!navigator.onLine) return;
         const students = await getOfflineStudents();
         if (students.length === 0) return;
 
         let shouldRefreshList = false;
-
-        // Get schema from window variable or from URL
-        let schema = window.AXIS_SCHEMA || '';
-        if (!schema) {
-            // Fallback: extract from URL path
-            const pathParts = window.location.pathname.split('/');
-            if (pathParts.length >= 3 && pathParts[1] === 'portal') {
-                schema = pathParts[2];
-            }
-        }
+        const schema = window.AXIS_SCHEMA || getSchemaFromPath();
         if (!schema) {
             console.warn('No tenant schema found, cannot sync');
             return;
@@ -324,25 +386,24 @@
 
         for (const student of students) {
             try {
-                const resp = await fetch(`/portal/${schema}/api/sync-offline-student/`, {
+                const response = await fetch(`/portal/${schema}/api/sync-offline-student/`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'X-CSRFToken': getCsrfToken()
                     },
+                    credentials: 'same-origin',
                     body: JSON.stringify(student.data)
                 });
-                if (resp.ok) {
+                if (response.ok) {
                     await deleteOfflineStudent(student.id);
                     shouldRefreshList = true;
-                    clearPendingListState();
-                    showToast('✅ Student synced: ' + student.data.name);
                 } else {
-                    const errorText = await resp.text();
-                    console.error('Sync failed for student', student.data.name, errorText);
+                    const errorText = await response.text();
+                    console.error('Sync failed for student', student.data, errorText);
                 }
-            } catch (e) {
-                console.error('Sync error:', e);
+            } catch (err) {
+                console.error('Sync error:', err);
             }
         }
 
@@ -351,78 +412,44 @@
         }
     }
 
-    function getCsrfToken() {
-        const cookie = document.cookie.split('; ').find(row => row.startsWith('csrftoken='));
-        return cookie ? cookie.split('=')[1] : '';
-    }
-
-    // Toast notification (improved)
-    function showToast(msg) {
+    function showToast(message) {
         const existing = document.querySelector('.offline-toast');
         if (existing) existing.remove();
-
         const toast = document.createElement('div');
         toast.className = 'offline-toast';
-        toast.style.cssText = `
-            position: fixed;
-            bottom: 100px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #10b981;
-            color: white;
-            padding: 12px 24px;
-            border-radius: 30px;
-            font-weight: 600;
-            z-index: 9999;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-            animation: fadeInUp 0.4s ease;
-            max-width: 90%;
-            text-align: center;
-            font-size: 0.95rem;
-        `;
-        toast.textContent = msg;
+        toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#10b981;color:#fff;padding:0.85rem 1rem;border-radius:999px;box-shadow:0 10px 24px rgba(0,0,0,0.18);z-index:9999;font-weight:700;';
+        toast.textContent = message;
         document.body.appendChild(toast);
         setTimeout(() => {
             toast.style.opacity = '0';
-            toast.style.transition = 'opacity 0.3s';
-            setTimeout(() => toast.remove(), 400);
+            toast.style.transition = 'opacity 0.25s ease';
+            setTimeout(() => toast.remove(), 250);
         }, 4000);
     }
 
-    // Expose functions globally
     window.offlineStudent = {
         save: saveOfflineStudent,
-        sync: syncOfflineStudents,
+        delete: deleteOfflineStudent,
         getPending: getOfflineStudents,
+        savePayment: saveOfflinePayment,
+        deletePayment: deleteOfflinePayment,
+        getPayments: getOfflinePayments,
+        getPaymentsByStudent: getOfflinePaymentsByStudent,
+        updatePayment: updateOfflinePayment,
+        sync: syncOfflineStudents,
         notify: showToast,
         queue: queueStudentSubmission,
-        submitForm: submitStudentForm
+        submitForm: submitStudentForm,
+        broadcastUpdate: broadcastOfflineUpdate,
+        receiveUpdates: receiveOfflineUpdates,
+        getCsrfToken: getCsrfToken
     };
 
-    // Auto-sync when online
-    window.addEventListener('online', () => {
-        syncOfflineStudents();
-    });
-
-    // Also sync on page load if online or if there are pending offline items
-    document.addEventListener('DOMContentLoaded', async () => {
-        console.log('[Offline] DOMContentLoaded fired');
-        await renderPendingQueue();
+    window.addEventListener('online', syncOfflineStudents);
+    document.addEventListener('DOMContentLoaded', () => {
+        renderPendingQueue();
         if (navigator.onLine) {
-            console.log('[Offline] Online, starting sync in 3 seconds');
             setTimeout(syncOfflineStudents, 3000);
-        } else {
-            console.log('[Offline] Offline mode detected');
         }
     });
-
-    // Check for pending students and show a badge (optional)
-    async function showPendingBadge() {
-        const students = await getOfflineStudents();
-        if (students.length === 0) return;
-        // You can add a UI indicator here if desired
-        console.log(`[Offline] ${students.length} pending students to sync.`);
-    }
-    showPendingBadge();
-
 })();

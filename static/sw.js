@@ -4,7 +4,8 @@ const STATIC_ASSETS = [
     '/manifest.json',
     '/static/icons/icon-192.png',
     '/static/icons/icon-512.png',
-    '/static/js/offline_student.js'
+    '/static/js/offline_student.js',
+    '/static/js/offline_payment.js'
 ];
 
 // Refresh all student profiles by fetching the API and caching each profile

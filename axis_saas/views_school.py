@@ -145,6 +145,95 @@ def update_student_from_payload(schema_name, student_id, payload):
         return student, form
 
 
+def build_payment_remarks(remarks, fee_to_apply, item_breakdown, temp_receipt=None):
+    combined_remarks = (remarks or '').strip()
+    item_details = '; '.join([
+        f"{product.name} x{qty} @ ₹{product.selling_price} = ₹{line_total:.2f}"
+        for product, qty, line_total in item_breakdown
+    ]) if item_breakdown else ''
+
+    if fee_to_apply > 0 and item_breakdown:
+        combined_remarks = (combined_remarks + '\n' if combined_remarks else '') + (
+            f"Fee payment applied: ₹{fee_to_apply:.2f}. Items sold: {item_details}"
+        )
+    elif fee_to_apply > 0:
+        combined_remarks = combined_remarks or 'Fee payment'
+    elif item_breakdown:
+        combined_remarks = (combined_remarks + '\n' if combined_remarks else '') + ('Items sold: ' + item_details)
+
+    if temp_receipt:
+        combined_remarks = (combined_remarks + '\n' if combined_remarks else '') + f"Offline temp receipt: {temp_receipt}"
+
+    return combined_remarks or 'Payment recorded offline.'
+
+
+def apply_fee_payment(student, amount, payment_mode, remarks, product_items, created_by='admin'):
+    if amount is None or amount <= 0:
+        raise ValueError('Invalid payment amount')
+
+    product_total = Decimal('0.00')
+    item_breakdown = []
+    for item in product_items or []:
+        try:
+            product_id = int(item.get('product_id'))
+            qty = int(item.get('quantity', 0))
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+
+        product = Product.objects.filter(id=product_id).first()
+        if not product:
+            raise ValueError(f'Product {product_id} not found')
+        if product.quantity < qty:
+            raise ValueError(f'Only {product.quantity} units available for {product.name}')
+
+        line_total = product.selling_price * qty
+        product_total += line_total
+        item_breakdown.append((product, qty, line_total))
+
+    pending_records = student.fee_records.filter(status__in=['pending', 'partial', 'overdue']).order_by('due_date')
+    fee_pending = sum(r.remaining_total for r in pending_records)
+    total_due = fee_pending + product_total
+
+    fee_to_apply = min(amount, fee_pending) if fee_pending else Decimal('0.00')
+    item_to_apply = max(amount - fee_to_apply, Decimal('0.00'))
+    item_to_apply = min(item_to_apply, product_total) if product_total else Decimal('0.00')
+
+    remaining = fee_to_apply
+    paid_records = []
+    for record in pending_records:
+        if remaining <= 0:
+            break
+        due = record.remaining_total
+        apply_now = min(due, remaining)
+        record.paid_amount += apply_now
+        remaining -= apply_now
+        record.save()
+        paid_records.append(record)
+
+    combined_remarks = build_payment_remarks(remarks, fee_to_apply, item_breakdown)
+
+    payment_record = PaymentTransaction.objects.create(
+        student=student,
+        amount=amount,
+        payment_mode=payment_mode,
+        payment_type='full' if amount >= total_due else 'partial',
+        remarks=combined_remarks,
+        created_by=created_by
+    )
+
+    if paid_records:
+        payment_record.fee_records.set(paid_records)
+
+    if item_breakdown:
+        for product, qty, _ in item_breakdown:
+            product.quantity -= qty
+            product.save(update_fields=['quantity'])
+
+    return payment_record, total_due
+
+
 MOBILE_AGENT_RE = re.compile(r"Mobile|Android|iP(hone|od|ad)|Opera Mini|IEMobile|BlackBerry|webOS|Fennec|Silk", re.I)
 
 
@@ -1349,6 +1438,70 @@ def sync_offline_student_api(request, schema_name):
         return JsonResponse({'ok': True, 'student_id': student.id, 'roll_number': student.roll_number})
 
     return JsonResponse({'ok': False, 'errors': json.loads(form.errors.as_json())}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_tenant_type(['school'])
+@require_school_feature('fee_collection')
+def sync_offline_payment_api(request, schema_name):
+    get_tenant(request, schema_name)
+    try:
+        if request.content_type and 'application/json' in request.content_type:
+            payload = json.loads(request.body.decode('utf-8') or '{}')
+        else:
+            payload = request.POST
+    except json.JSONDecodeError:
+        return JsonResponse({'ok': False, 'error': 'Invalid JSON payload'}, status=400)
+
+    student_id = payload.get('student_id')
+    if not student_id:
+        return JsonResponse({'ok': False, 'error': 'Missing student_id'}, status=400)
+
+    try:
+        amount = Decimal(str(payload.get('amount', '0')))
+    except Exception:
+        return JsonResponse({'ok': False, 'error': 'Invalid amount'}, status=400)
+
+    if amount <= 0:
+        return JsonResponse({'ok': False, 'error': 'Amount must be greater than zero'}, status=400)
+
+    payment_mode = payload.get('payment_mode') or 'cash'
+    remarks = payload.get('remarks') or ''
+    temp_receipt = payload.get('temp_receipt')
+    product_items = payload.get('product_items') or []
+
+    if not temp_receipt:
+        temp_receipt = f"OFFLINE-{int(datetime.utcnow().timestamp() * 1000)}"
+
+    try:
+        with schema_context(schema_name):
+            student = Student.objects.filter(id=student_id).first()
+            if not student:
+                return JsonResponse({'ok': False, 'error': 'Student not found'}, status=404)
+
+            existing = PaymentTransaction.objects.filter(remarks__icontains=temp_receipt).first()
+            if existing:
+                return JsonResponse({'ok': True, 'receipt_number': existing.receipt_number, 'payment_id': existing.id})
+
+            payment_record, total_due = apply_fee_payment(
+                student,
+                amount,
+                payment_mode,
+                remarks,
+                product_items,
+                created_by=request.session.get('school_admin_username', 'admin')
+            )
+            if payment_record:
+                payment_record.remarks = build_payment_remarks(remarks, min(amount, total_due), [
+                    (Product.objects.get(id=int(item.get('product_id'))), int(item.get('quantity', 0)), Product.objects.get(id=int(item.get('product_id'))).selling_price * int(item.get('quantity', 0)))
+                    for item in product_items if item.get('product_id') and int(item.get('quantity', 0)) > 0
+                ], temp_receipt=temp_receipt)
+                payment_record.save(update_fields=['remarks'])
+
+            return JsonResponse({'ok': True, 'receipt_number': payment_record.receipt_number, 'payment_id': payment_record.id})
+    except Exception as e:
+        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
 
 
 @require_tenant_type(['school'])

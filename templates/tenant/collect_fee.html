@@ -845,15 +845,5 @@ if (generateSingleBtn) {
 syncItemCart();
 updateDueSummary();
 </script>
+<script src="{% static 'js/offline_payment.js' %}"></script>
 {% endblock %}
-
-<script>
-    if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
-        const currentPath = window.location.pathname.replace(/\/+$|\?.*$/, '');
-        // Replace the fee/collection or fee/receipt path with the mobile version
-        const newPath = currentPath.replace(/fee/collection//, 'fee/collection/mobile/');
-        if (newPath !== currentPath) {
-            window.location.replace(newPath);
-        }
-    }
-</script>
