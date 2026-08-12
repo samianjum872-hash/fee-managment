@@ -412,6 +412,35 @@
         }
     }
 
+    function showOfflineSyncBanner(message, isError = false) {
+        const existing = document.querySelector('.offline-sync-notice');
+        if (existing) existing.remove();
+        const banner = document.createElement('div');
+        banner.className = 'offline-sync-notice';
+        banner.style.cssText = 'margin-bottom:1rem;padding:1rem 1.2rem;border-radius:0.75rem;border:1px solid;';
+        banner.style.background = isError ? '#fee2e2' : '#ecfdf5';
+        banner.style.color = isError ? '#991b1b' : '#064e3b';
+        banner.style.borderColor = isError ? '#fca5a5' : '#a7f3d0';
+        banner.textContent = message;
+        const target = document.querySelector('.table-card, .student-list, .profile-header, .main-content, body');
+        if (target) {
+            target.parentNode.insertBefore(banner, target);
+        } else {
+            document.body.prepend(banner);
+        }
+    }
+
+    function handleOfflinePaymentBroadcast(message) {
+        if (!message || !message.type) return;
+        if (message.type === 'offline_payment_created') {
+            showOfflineSyncBanner('An offline payment is pending sync. Connect to update your data.', false);
+        }
+        if (message.type === 'offline_payment_synced') {
+            showOfflineSyncBanner('Offline payment synced. Reloading to refresh data...', false);
+            setTimeout(() => window.location.reload(), 1200);
+        }
+    }
+
     function showToast(message) {
         const existing = document.querySelector('.offline-toast');
         if (existing) existing.remove();
@@ -448,6 +477,20 @@
     window.addEventListener('online', syncOfflineStudents);
     document.addEventListener('DOMContentLoaded', () => {
         renderPendingQueue();
+        if ('BroadcastChannel' in window) {
+            const channel = new BroadcastChannel('axis-offline-sync');
+            channel.addEventListener('message', event => {
+                const message = event.data;
+                if (!message || !message.type) return;
+                if (message.type === 'offline_payment_created') {
+                    showOfflineSyncBanner('An offline payment is pending sync. Connect to update your data.');
+                }
+                if (message.type === 'offline_payment_synced') {
+                    showOfflineSyncBanner('Offline payment synced. Reloading to refresh data...');
+                    setTimeout(() => window.location.reload(), 1200);
+                }
+            });
+        }
         if (navigator.onLine) {
             setTimeout(syncOfflineStudents, 3000);
         }

@@ -1482,7 +1482,12 @@ def sync_offline_payment_api(request, schema_name):
 
             existing = PaymentTransaction.objects.filter(remarks__icontains=temp_receipt).first()
             if existing:
-                return JsonResponse({'ok': True, 'receipt_number': existing.receipt_number, 'payment_id': existing.id})
+                return JsonResponse({
+                    'ok': True,
+                    'receipt_number': existing.receipt_number,
+                    'payment_id': existing.id,
+                    'message': 'Offline payment already processed.'
+                })
 
             payment_record, total_due = apply_fee_payment(
                 student,
@@ -1492,14 +1497,38 @@ def sync_offline_payment_api(request, schema_name):
                 product_items,
                 created_by=request.session.get('school_admin_username', 'admin')
             )
-            if payment_record:
-                payment_record.remarks = build_payment_remarks(remarks, min(amount, total_due), [
-                    (Product.objects.get(id=int(item.get('product_id'))), int(item.get('quantity', 0)), Product.objects.get(id=int(item.get('product_id'))).selling_price * int(item.get('quantity', 0)))
-                    for item in product_items if item.get('product_id') and int(item.get('quantity', 0)) > 0
-                ], temp_receipt=temp_receipt)
-                payment_record.save(update_fields=['remarks'])
 
-            return JsonResponse({'ok': True, 'receipt_number': payment_record.receipt_number, 'payment_id': payment_record.id})
+            if not payment_record:
+                return JsonResponse({'ok': False, 'error': 'Unable to create payment record.'}, status=400)
+
+            if total_due <= 0 and not product_items:
+                return JsonResponse({
+                    'ok': False,
+                    'error': 'The payment could not be applied because the pending fee is already paid and no items were selected.'
+                }, status=409)
+
+            payment_record.remarks = build_payment_remarks(
+                remarks,
+                min(amount, total_due),
+                [
+                    (
+                        Product.objects.get(id=int(item.get('product_id'))),
+                        int(item.get('quantity', 0)),
+                        Product.objects.get(id=int(item.get('product_id'))).selling_price * int(item.get('quantity', 0))
+                    )
+                    for item in product_items
+                    if item.get('product_id') and int(item.get('quantity', 0)) > 0
+                ],
+                temp_receipt=temp_receipt
+            )
+            payment_record.save(update_fields=['remarks'])
+
+            return JsonResponse({
+                'ok': True,
+                'receipt_number': payment_record.receipt_number,
+                'payment_id': payment_record.id,
+                'message': 'Offline payment synced successfully.'
+            })
     except Exception as e:
         return JsonResponse({'ok': False, 'error': str(e)}, status=400)
 
